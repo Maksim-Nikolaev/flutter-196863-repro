@@ -28,7 +28,10 @@ Ubuntu 26.04.1, KWin 6.6.6, Flutter 3.50.0 (engine 371f77202a), release build.
 
 ## Unit test for #196862
 
-`engine-test/196862-unit-test.diff` adds `FlViewRendererSubsurfaceTest.RecreateSubsurfaceAfterShow` to the Linux embedder tests. The test puts the renderer in an offscreen window, mocks the Wayland display and the toplevel `wl_surface` in `testing/mock_gtk`, hides and shows the window, and makes the new surface available only after `map`. It fails without #196862 (one `wl_subsurface` instead of two) and passes with it.
+`engine-test/196862-unit-test.diff` adds two tests to the Linux embedder tests. Both put the renderer in an offscreen window and mock the Wayland display and the toplevel `wl_surface` in `testing/mock_gtk`.
+
+- `FlViewRendererSubsurfaceTest.RecreateSubsurfaceAfterShow` hides and shows the window and makes the new surface available only after `map`. It fails without #196862 (one `wl_subsurface` instead of two) and passes with it.
+- `FlViewRendererSubsurfaceTest.NoSubsurfaceWhenHiddenBeforeIdle` shows the window and hides it again before the idle callback runs, while the surface still exists. It fails if the `gtk_widget_get_mapped()` check in the idle callback is removed (a subsurface is made on the hidden window) and passes with #196862. It also checks that a later show makes the subsurface.
 
 Apply it on top of the PR branch from the root of a flutter/flutter checkout:
 
