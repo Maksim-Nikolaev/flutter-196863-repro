@@ -1,0 +1,147 @@
+diff -ru a/engine/src/flutter/shell/platform/linux/fl_view_renderer_subsurface_test.cc b/engine/src/flutter/shell/platform/linux/fl_view_renderer_subsurface_test.cc
+--- a/engine/src/flutter/shell/platform/linux/fl_view_renderer_subsurface_test.cc
++++ b/engine/src/flutter/shell/platform/linux/fl_view_renderer_subsurface_test.cc
+@@ -11,12 +11,16 @@
+ #include "flutter/shell/platform/linux/fl_view_renderer.h"
+ #include "flutter/shell/platform/linux/testing/fl_test_gtk_logs.h"
+ #include "flutter/shell/platform/linux/testing/linux_test.h"
++#include "flutter/shell/platform/linux/testing/mock_epoxy.h"
+ #include "flutter/shell/platform/linux/testing/mock_gtk.h"
++#include "flutter/shell/platform/linux/testing/mock_wayland.h"
+ 
+ class FlViewRendererSubsurfaceTest : public flutter::testing::LinuxTest {
+  protected:
+   // GTK queries the window state when widgets are realized.
+   ::testing::NiceMock<flutter::testing::MockGtk> gtk;
++  ::testing::NiceMock<flutter::testing::MockEpoxy> epoxy;
++  ::testing::NiceMock<flutter::testing::MockWayland> wayland;
+ };
+ 
+ TEST_F(FlViewRendererSubsurfaceTest, New) {
+@@ -81,3 +85,59 @@
+ 
+   g_object_unref(renderer);
+ }
++
++// GTK destroys the window's Wayland surface when it is hidden. When the window
++// is shown again the new surface may not exist yet when the widget is mapped,
++// so the subsurface is recreated once it does.
++TEST_F(FlViewRendererSubsurfaceTest, RecreateSubsurfaceAfterShow) {
++  // GDK can't destroy a window without a backend, so this is never freed.
++  static GdkWindow* toplevel_window =
++      GDK_WINDOW(g_object_new(gdk_wayland_window_get_type(), nullptr));
++  struct wl_surface* old_surface =
++      flutter::testing::fl_mock_wayland_get_surface();
++  struct wl_surface* new_surface =
++      flutter::testing::fl_mock_wayland_get_surface();
++  struct wl_surface* toplevel_surface = old_surface;
++
++  FlViewRendererSubsurface* renderer =
++      fl_view_renderer_subsurface_new(engine, FALSE);
++  ASSERT_NE(renderer, nullptr);
++  GtkWidget* window = gtk_offscreen_window_new();
++  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(renderer));
++
++  GdkDisplay* display = gdk_display_get_default();
++  ASSERT_TRUE(GDK_IS_WAYLAND_DISPLAY(display));
++  ON_CALL(gtk, gtk_widget_get_display)
++      .WillByDefault(::testing::Return(display));
++  ON_CALL(gtk, gdk_wayland_display_get_wl_display(display))
++      .WillByDefault(
++          ::testing::Return(flutter::testing::fl_mock_wayland_get_display()));
++  ON_CALL(gtk, gtk_widget_get_window(GTK_WIDGET(renderer)))
++      .WillByDefault(::testing::Return(toplevel_window));
++  ON_CALL(gtk, gdk_wayland_window_get_wl_surface(toplevel_window))
++      .WillByDefault(::testing::ReturnPointee(&toplevel_surface));
++
++  int subsurface_count = 0;
++  ON_CALL(wayland, CreateObject(::testing::StrEq("wl_subsurface")))
++      .WillByDefault([&subsurface_count](const char*) { subsurface_count++; });
++
++  gtk_widget_show_all(window);
++  while (g_main_context_iteration(nullptr, FALSE)) {
++  }
++  EXPECT_EQ(subsurface_count, 1);
++
++  // Hide the window, which destroys its surface.
++  toplevel_surface = nullptr;
++  gtk_widget_hide(window);
++
++  // Show the window, with the new surface only made after it is mapped.
++  gtk_widget_show_all(window);
++  toplevel_surface = new_surface;
++  while (g_main_context_iteration(nullptr, FALSE)) {
++  }
++  EXPECT_EQ(subsurface_count, 2);
++
++  fl_gtk_widget_destroy(window);
++  flutter::testing::fl_mock_wayland_free_surface(old_surface);
++  flutter::testing::fl_mock_wayland_free_surface(new_surface);
++}
+diff -ru a/engine/src/flutter/shell/platform/linux/testing/mock_gtk.cc b/engine/src/flutter/shell/platform/linux/testing/mock_gtk.cc
+--- a/engine/src/flutter/shell/platform/linux/testing/mock_gtk.cc
++++ b/engine/src/flutter/shell/platform/linux/testing/mock_gtk.cc
+@@ -102,6 +102,22 @@
+   return mock->gdk_window_get_state(window);
+ }
+ 
++struct wl_display* gdk_wayland_display_get_wl_display(GdkDisplay* display) {
++  check_thread();
++  if (mock == nullptr) {
++    return nullptr;
++  }
++  return mock->gdk_wayland_display_get_wl_display(display);
++}
++
++struct wl_surface* gdk_wayland_window_get_wl_surface(GdkWindow* window) {
++  check_thread();
++  if (mock == nullptr) {
++    return nullptr;
++  }
++  return mock->gdk_wayland_window_get_wl_surface(window);
++}
++
+ GdkDisplay* gdk_window_get_display(GdkWindow* window) {
+   check_thread();
+   return GDK_DISPLAY(g_object_new(gdk_wayland_display_get_type(), nullptr));
+@@ -252,7 +268,10 @@
+ 
+ GdkDisplay* gtk_widget_get_display(GtkWidget* widget) {
+   check_thread();
+-  return nullptr;
++  if (mock == nullptr) {
++    return nullptr;
++  }
++  return mock->gtk_widget_get_display(widget);
+ }
+ 
+ gint gtk_widget_get_scale_factor(GtkWidget* widget) {
+Only in b/engine/src/flutter/shell/platform/linux/testing: mock_gtk.cc.orig
+diff -ru a/engine/src/flutter/shell/platform/linux/testing/mock_gtk.h b/engine/src/flutter/shell/platform/linux/testing/mock_gtk.h
+--- a/engine/src/flutter/shell/platform/linux/testing/mock_gtk.h
++++ b/engine/src/flutter/shell/platform/linux/testing/mock_gtk.h
+@@ -10,6 +10,9 @@
+ #include <atk/atk.h>
+ #include <gtk/gtk.h>
+ 
++struct wl_display;
++struct wl_surface;
++
+ namespace flutter {
+ namespace testing {
+ 
+@@ -57,6 +60,13 @@
+                gint* dest_y));
+   MOCK_METHOD(GtkWidget*, gtk_widget_get_toplevel, (GtkWidget * widget));
+   MOCK_METHOD(GdkWindow*, gtk_widget_get_window, (GtkWidget * widget));
++  MOCK_METHOD(GdkDisplay*, gtk_widget_get_display, (GtkWidget * widget));
++  MOCK_METHOD(struct wl_display*,
++              gdk_wayland_display_get_wl_display,
++              (GdkDisplay * display));
++  MOCK_METHOD(struct wl_surface*,
++              gdk_wayland_window_get_wl_surface,
++              (GdkWindow * window));
+   MOCK_METHOD(void,
+               gtk_im_context_set_client_window,
+               (GtkIMContext * context, GdkWindow* window));
+Only in b/engine/src/flutter/shell/platform/linux/testing: mock_gtk.h.orig

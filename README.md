@@ -25,3 +25,15 @@ Ubuntu 26.04.1, KWin 6.6.6, Flutter 3.50.0 (engine 371f77202a), release build.
 | 0 ms | 5 | black | renders |
 | 100 ms | 5 | black | renders |
 | 1000 ms | 3 | black | renders |
+
+## Unit test for #196862
+
+`engine-test/196862-unit-test.diff` adds `FlViewRendererSubsurfaceTest.RecreateSubsurfaceAfterShow` to the Linux embedder tests. The test puts the renderer in an offscreen window, mocks the Wayland display and the toplevel `wl_surface` in `testing/mock_gtk`, hides and shows the window, and makes the new surface available only after `map`. It fails without #196862 (one `wl_subsurface` instead of two) and passes with it.
+
+Apply it on top of the PR branch from the root of a flutter/flutter checkout:
+
+```bash
+curl -sL https://raw.githubusercontent.com/Maksim-Nikolaev/flutter-196863-repro/main/engine-test/196862-unit-test.diff | git apply
+```
+
+Then build `flutter/shell/platform/linux:flutter_linux_unittests` and run it with `--gtest_filter='FlViewRendererSubsurfaceTest.*'`.
